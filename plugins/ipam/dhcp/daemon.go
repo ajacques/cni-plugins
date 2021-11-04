@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -35,6 +36,7 @@ import (
 )
 
 const listenFdsStart = 3
+const savedLeaseLocation = "/run/dhcp-leases.json"
 
 var errNoMoreTries = errors.New("no more tries")
 
@@ -47,12 +49,20 @@ type DHCP struct {
 	broadcast       bool
 }
 
-func newDHCP(clientTimeout, clientResendMax time.Duration) *DHCP {
-	return &DHCP{
+func newDHCP(clientTimeout, clientResendMax time.Duration, broadcast bool) *DHCP {
+	leases, _ := LoadSavedLeases(savedLeaseLocation, clientTimeout, clientResendMax, broadcast)
+	dhcp := &DHCP{
 		leases:          make(map[string]*DHCPLease),
 		clientTimeout:   clientTimeout,
 		clientResendMax: clientResendMax,
 	}
+
+	for _, val := range leases {
+		log.Printf("Found existing lease %v", val.clientID)
+		dhcp.setLease(val.clientID, val)
+	}
+
+	return dhcp
 }
 
 func generateClientID(containerID string, netName string, ifName string) string {
@@ -81,6 +91,12 @@ func (d *DHCP) Allocate(args *skel.CmdArgs, result *current.Result) error {
 	}
 
 	d.setLease(clientID, l)
+
+	fmt.Println("Saving")
+	err = PersistActiveLeases(savedLeaseLocation, d.leases)
+	if err != nil {
+		return err
+	}
 
 	result.IPs = []*current.IPConfig{{
 		Address: *ipn,
@@ -184,7 +200,7 @@ func runDaemon(
 		return fmt.Errorf("Error getting listener: %v", err)
 	}
 
-	dhcp := newDHCP(dhcpClientTimeout, resendMax)
+	dhcp := newDHCP(dhcpClientTimeout, resendMax, broadcast)
 	dhcp.hostNetnsPrefix = hostPrefix
 	dhcp.broadcast = broadcast
 	rpc.Register(dhcp)
