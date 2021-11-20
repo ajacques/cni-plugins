@@ -92,7 +92,6 @@ func (d *DHCP) Allocate(args *skel.CmdArgs, result *current.Result) error {
 
 	d.setLease(clientID, l)
 
-	fmt.Println("Saving")
 	err = PersistActiveLeases(savedLeaseLocation, d.leases)
 	if err != nil {
 		return err
