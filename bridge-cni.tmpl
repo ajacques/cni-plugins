@@ -3,25 +3,14 @@
   "name": "dhcp-cni-network",
   "plugins": [
     {
-      "type": "macvlan",
-      "name": "macvlan",
-      "master": "MASTER_IFACE",
+      "type": "bridge",
+      "name": "mybridge",
+      "bridge": "cni0",
+      "isDefaultGateway": false,
+      "uplinkInterface": "eth0",
       "ipam": {
         "type": "dhcp"
       }
-    },
-    {
-      "type": "tuning",
-      "sysctl": {
-        "net.ipv6.conf.eth0.autoconf": "1",
-        "net.ipv6.conf.default.autoconf": "1",
-        "net.ipv6.conf.eth0.accept_ra": "1",
-        "net.ipv6.conf.default.accept_ra": "1"
-      }
-    },
-    {
-      "type": "route-fix",
-      "master": "MASTER_IFACE"
     }
   ]
 }

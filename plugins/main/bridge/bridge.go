@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"sort"
 	"syscall"
 	"time"
 
@@ -58,6 +59,7 @@ type NetConf struct {
 	PromiscMode  bool   `json:"promiscMode"`
 	Vlan         int    `json:"vlan"`
 	MacSpoofChk  bool   `json:"macspoofchk,omitempty"`
+	UplinkInterface string `json:"uplinkInterface"`
 
 	Args struct {
 		Cni BridgeArgs `json:"cni,omitempty"`
@@ -257,7 +259,7 @@ func bridgeByName(name string) (*netlink.Bridge, error) {
 	return br, nil
 }
 
-func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool) (*netlink.Bridge, error) {
+func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool, uplinkName string) (*netlink.Bridge, error) {
 	br := &netlink.Bridge{
 		LinkAttrs: netlink.LinkAttrs{
 			Name: brName,
@@ -296,6 +298,94 @@ func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool) (*net
 
 	if err := netlink.LinkSetUp(br); err != nil {
 		return nil, err
+	}
+
+	uplinkLink, err := netlink.LinkByName(uplinkName)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't find uplink interface '%s': %v", uplinkName, err)
+	}
+
+	uplinkAddrs, err := netlink.AddrList(uplinkLink, netlink.FAMILY_V4)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't find IPv4 addresses for ")
+	}
+
+	addrs, err := netlink.AddrList(br, netlink.FAMILY_V4)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't get addrs for interface '%s': %v", br.Name, err)
+	}
+	gwIp := uplinkAddrs[0].IP
+	foundAddr := false
+	for _, addr := range addrs {
+		if addr.IP.Equal(gwIp) {
+			foundAddr = true
+			break
+		}
+	}
+	var failed bool
+	if !foundAddr {
+		addr := &netlink.Addr{
+			IPNet: netlink.NewIPNet(gwIp),
+		}
+		err = netlink.AddrAdd(br, addr)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if failed {
+				netlink.AddrDel(br, addr)
+			}
+		}()
+	}
+
+
+	// Add the uplink interface to the bridge if it isn't already there
+	if uplinkLink.Attrs().MasterIndex != br.Attrs().Index && uplinkLink.Attrs().MasterIndex != 0 {
+		master, err := netlink.LinkByIndex(uplinkLink.Attrs().MasterIndex)
+		if err != nil {
+			failed = true
+			return nil, fmt.Errorf("interface %s has already a master set (actual=%d, desired=%d), could not retrieve the name: %v", uplinkName, uplinkLink.Attrs().MasterIndex, br.Attrs().Index, err)
+		}
+		return nil, fmt.Errorf("interface %s has already a master set: %s", uplinkName, master.Attrs().Name)
+	}
+	err = netlink.LinkSetMaster(uplinkLink, br)
+	if err != nil {
+		failed = true
+		return nil, fmt.Errorf("couldn't add interface '%s' to bridge '%s': %v", uplinkName, brName, err)
+	}
+	// Routes on the uplink (e.g. eth0) interface need to be moved to the bridge so the kernel correctly routes packets
+	routes, err := netlink.RouteList(uplinkLink, netlink.FAMILY_V4)
+	if err != nil {
+		failed = true
+		return nil, fmt.Errorf("couldn't get routes for uplink interface to move to bridge: %v", err)
+	}
+	if len(routes) > 0 {
+		// Sort routes so that most specific routes appear first. This is to avoid an issue where we can't create a
+		// default route until the subnet route is available
+		sort.Slice(routes, func(i, j int) bool {
+			l, _ := routes[i].Dst.Mask.Size()
+			if routes[j].Dst == nil {
+				return true
+			}
+			if routes[j].Dst.Mask == nil {
+				return true
+			}
+			r, _ := routes[j].Dst.Mask.Size()
+			return l >= r
+		})
+		for _, route := range routes {
+			err = netlink.RouteDel(&route)
+			if err != nil {
+				failed = true
+				return nil, fmt.Errorf("couldn't delete route from uplink: %v", err)
+			}
+			route.LinkIndex = br.Index
+			err = netlink.RouteAdd(&route)
+			if err != nil {
+				failed = true
+				return nil, fmt.Errorf("couldn't move route to bridge: %v", err)
+			}
+		}
 	}
 
 	return br, nil
@@ -387,7 +477,7 @@ func setupBridge(n *NetConf) (*netlink.Bridge, *current.Interface, error) {
 		vlanFiltering = true
 	}
 	// create bridge if necessary
-	br, err := ensureBridge(n.BrName, n.MTU, n.PromiscMode, vlanFiltering)
+	br, err := ensureBridge(n.BrName, n.MTU, n.PromiscMode, vlanFiltering, n.UplinkInterface)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create bridge %q: %v", n.BrName, err)
 	}
@@ -535,10 +625,11 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 		// check bridge port state
 		retries := []int{0, 50, 500, 1000, 1000}
+		var hostVeth netlink.Link
 		for idx, sleep := range retries {
 			time.Sleep(time.Duration(sleep) * time.Millisecond)
 
-			hostVeth, err := netlink.LinkByName(hostInterface.Name)
+			hostVeth, err = netlink.LinkByName(hostInterface.Name)
 			if err != nil {
 				return err
 			}
@@ -551,9 +642,10 @@ func cmdAdd(args *skel.CmdArgs) error {
 			}
 		}
 
+		var contVeth *net.Interface
 		// Send a gratuitous arp
 		if err := netns.Do(func(_ ns.NetNS) error {
-			contVeth, err := net.InterfaceByName(args.IfName)
+			contVeth, err = net.InterfaceByName(args.IfName)
 			if err != nil {
 				return err
 			}
@@ -566,6 +658,94 @@ func cmdAdd(args *skel.CmdArgs) error {
 			return nil
 		}); err != nil {
 			return err
+		}
+
+		// Setup container routes
+		uplinkLinkName := "eth0"
+
+		uplinkLink, err := netlink.LinkByName(uplinkLinkName)
+		if err != nil {
+			return fmt.Errorf("couldn't find uplink interface '%s': %v", uplinkLinkName, err)
+		}
+
+		uplinkAddrs, err := netlink.AddrList(uplinkLink, netlink.FAMILY_V4)
+		if err != nil {
+			return fmt.Errorf("couldn't find IPv4 addresses for ")
+		}
+
+		gwIp := uplinkAddrs[0].IP
+		err = netns.Do(func(_ ns.NetNS) error {
+			containerLink, err := netlink.LinkByName(args.IfName)
+			if err != nil {
+				return fmt.Errorf("couldn't find interface '%s' even though we just created it: %v", args.IfName, err)
+			}
+
+			routes, _ := netlink.RouteList(containerLink, netlink.FAMILY_ALL)
+			for _, route := range routes {
+				err = netlink.RouteDel(&route)
+				if err != nil {
+					return fmt.Errorf("couldn't delete all routes before setting up new routes: %v", err)
+				}
+			}
+
+			// Add the local scope
+			// This tells the container to forward everything to the host stack
+			err = netlink.RouteAdd(&netlink.Route{
+				LinkIndex: containerLink.Attrs().Index,
+				Scope:     netlink.SCOPE_LINK,
+				Dst:       netlink.NewIPNet(gwIp),
+			})
+			if err != nil {
+				return err
+			}
+
+			err = netlink.RouteAdd(&netlink.Route{
+				LinkIndex: containerLink.Attrs().Index,
+				Gw:        gwIp,
+				Src:       ipamResult.IPs[0].Address.IP,
+			})
+
+			if err != nil {
+				return err
+			}
+
+			brMac, err := net.ParseMAC(brInterface.Mac)
+			err = netlink.NeighSet(&netlink.Neigh{
+				LinkIndex:    containerLink.Attrs().Index,
+				Family:       netlink.FAMILY_V4,
+				State:        netlink.NUD_PERMANENT,
+				IP:           gwIp,
+				HardwareAddr: brMac,
+			})
+
+			return err
+		})
+		if err != nil {
+			return err
+		}
+
+		// Configure route from host to container
+		for _, ip := range ipamResult.IPs {
+			err = netlink.RouteAdd(&netlink.Route{
+				LinkIndex: hostVeth.Attrs().Index,
+				Dst: netlink.NewIPNet(ip.Address.IP),
+				Scope: netlink.SCOPE_LINK,
+			})
+
+			if err != nil {
+				return fmt.Errorf("couldn't route from host to container: %v", err)
+			}
+
+			err = netlink.NeighSet(&netlink.Neigh{
+				LinkIndex: hostVeth.Attrs().Index,
+				Family: netlink.FAMILY_V4,
+				State: netlink.NUD_PERMANENT,
+				IP: ip.Address.IP,
+				HardwareAddr: contVeth.HardwareAddr,
+			})
+			if err != nil {
+				return fmt.Errorf("couldn't add ARP route from host to container: %v", err)
+			}
 		}
 
 		if n.IsGW {
