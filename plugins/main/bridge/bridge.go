@@ -259,6 +259,36 @@ func bridgeByName(name string) (*netlink.Bridge, error) {
 	return br, nil
 }
 
+func copyAddress(from netlink.Link, to netlink.Link, family int) (bool, *netlink.Addr, error) {
+	uplinkAddrs, err := netlink.AddrList(from, family)
+	if err != nil {
+		return false, nil, fmt.Errorf("couldn't find IPv4 addresses for ")
+	}
+
+	addrs, err := netlink.AddrList(to, family)
+	if err != nil {
+		return false, nil, fmt.Errorf("couldn't get addrs for interface '%s': %v", from.Attrs().Name, err)
+	}
+	if len(uplinkAddrs) == 0 {
+		return false, nil, fmt.Errorf("didn't find any IP addresses for interface '%s'", from.Attrs().Name)
+	}
+	addr := uplinkAddrs[0]
+	foundAddr := false
+	for _, addr := range addrs {
+		if addr.Equal(addr) {
+			foundAddr = true
+			break
+		}
+	}
+	if !foundAddr {
+		err = netlink.AddrAdd(to, &addr)
+		if err != nil {
+			return false, nil, err
+		}
+	}
+	return !foundAddr, &addr, nil
+}
+
 func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool, uplinkName string) (*netlink.Bridge, error) {
 	br := &netlink.Bridge{
 		LinkAttrs: netlink.LinkAttrs{
@@ -294,7 +324,7 @@ func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool, uplin
 	}
 
 	// we want to own the routes for this interface
-	_, _ = sysctl.Sysctl(fmt.Sprintf("net/ipv6/conf/%s/accept_ra", brName), "0")
+	_, _ = sysctl.Sysctl(fmt.Sprintf("net/ipv6/conf/%s/accept_ra", brName), "1")
 
 	if err := netlink.LinkSetUp(br); err != nil {
 		return nil, err
@@ -305,39 +335,15 @@ func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool, uplin
 		return nil, fmt.Errorf("couldn't find uplink interface '%s': %v", uplinkName, err)
 	}
 
-	uplinkAddrs, err := netlink.AddrList(uplinkLink, netlink.FAMILY_V4)
-	if err != nil {
-		return nil, fmt.Errorf("couldn't find IPv4 addresses for ")
-	}
-
-	addrs, err := netlink.AddrList(br, netlink.FAMILY_V4)
-	if err != nil {
-		return nil, fmt.Errorf("couldn't get addrs for interface '%s': %v", br.Name, err)
-	}
-	gwIp := uplinkAddrs[0].IP
-	foundAddr := false
-	for _, addr := range addrs {
-		if addr.IP.Equal(gwIp) {
-			foundAddr = true
-			break
-		}
-	}
 	var failed bool
-	if !foundAddr {
-		addr := &netlink.Addr{
-			IPNet: netlink.NewIPNet(gwIp),
-		}
-		err = netlink.AddrAdd(br, addr)
-		if err != nil {
-			return nil, err
-		}
+	applied, gwIp, err := copyAddress(uplinkLink, br, netlink.FAMILY_V4)
+	if applied {
 		defer func() {
 			if failed {
-				netlink.AddrDel(br, addr)
+				netlink.AddrDel(br, gwIp)
 			}
 		}()
 	}
-
 
 	// Add the uplink interface to the bridge if it isn't already there
 	if uplinkLink.Attrs().MasterIndex != br.Attrs().Index && uplinkLink.Attrs().MasterIndex != 0 {
@@ -661,16 +667,18 @@ func cmdAdd(args *skel.CmdArgs) error {
 		}
 
 		// Setup container routes
-		uplinkLinkName := "eth0"
-
-		uplinkLink, err := netlink.LinkByName(uplinkLinkName)
+		uplinkLink, err := netlink.LinkByName(n.UplinkInterface)
 		if err != nil {
-			return fmt.Errorf("couldn't find uplink interface '%s': %v", uplinkLinkName, err)
+			return fmt.Errorf("couldn't find uplink interface '%s': %v", n.UplinkInterface, err)
 		}
 
 		uplinkAddrs, err := netlink.AddrList(uplinkLink, netlink.FAMILY_V4)
 		if err != nil {
-			return fmt.Errorf("couldn't find IPv4 addresses for ")
+			return fmt.Errorf("couldn't find IPv4 addresses for uplink interface: %v", err)
+		}
+		uplink6Addrs, err := netlink.AddrList(uplinkLink, netlink.FAMILY_V6)
+		if err != nil {
+			return fmt.Errorf("couldn't find IPv6 addresses for uplink interface: %v", err)
 		}
 
 		gwIp := uplinkAddrs[0].IP
@@ -695,6 +703,16 @@ func cmdAdd(args *skel.CmdArgs) error {
 				Scope:     netlink.SCOPE_LINK,
 				Dst:       netlink.NewIPNet(gwIp),
 			})
+			if err != nil {
+				return err
+			}
+
+			err = netlink.RouteAdd(&netlink.Route{
+				LinkIndex: containerLink.Attrs().Index,
+				Scope:     netlink.SCOPE_LINK,
+				Dst:       netlink.NewIPNet(uplink6Addrs[0].IP),
+			})
+
 			if err != nil {
 				return err
 			}
@@ -787,6 +805,13 @@ func cmdAdd(args *skel.CmdArgs) error {
 					}
 				}
 			}
+		}
+
+		if err = enableIPForward(netlink.FAMILY_V4); err != nil {
+			return fmt.Errorf("failed to enable forwarding: %v", err)
+		}
+		if err = enableIPForward(netlink.FAMILY_V6); err != nil {
+			return fmt.Errorf("failed to enable forwarding: %v", err)
 		}
 
 		if n.IPMasq {
