@@ -270,23 +270,33 @@ func copyAddress(from netlink.Link, to netlink.Link, family int) (bool, *netlink
 		return false, nil, fmt.Errorf("couldn't get addrs for interface '%s': %v", from.Attrs().Name, err)
 	}
 	if len(uplinkAddrs) == 0 {
+		if len(addrs) > 0 {
+			// Bridge already has the IP address
+			return false, &addrs[0], nil
+		}
 		return false, nil, fmt.Errorf("didn't find any IP addresses for interface '%s'", from.Attrs().Name)
 	}
-	addr := uplinkAddrs[0]
+	oldAddr := uplinkAddrs[0]
 	foundAddr := false
 	for _, addr := range addrs {
-		if addr.Equal(addr) {
+		if addr.Equal(oldAddr) {
 			foundAddr = true
 			break
 		}
 	}
+	newAddr := netlink.Addr{
+		IPNet: oldAddr.IPNet,
+		Scope: oldAddr.Scope,
+		PreferedLft: oldAddr.PreferedLft,
+		ValidLft: oldAddr.ValidLft,
+	}
 	if !foundAddr {
-		err = netlink.AddrAdd(to, &addr)
+		err = netlink.AddrAdd(to, &newAddr)
 		if err != nil {
-			return false, nil, err
+			return false, nil, fmt.Errorf("couldn't add IP address '%s' to interface '%s': %v", newAddr.IP, to.Attrs().Name, err)
 		}
 	}
-	return !foundAddr, &addr, nil
+	return !foundAddr, &newAddr, nil
 }
 
 func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool, uplinkName string) (*netlink.Bridge, error) {
@@ -337,6 +347,9 @@ func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool, uplin
 
 	var failed bool
 	applied, gwIp, err := copyAddress(uplinkLink, br, netlink.FAMILY_V4)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't copy IPv4 address to bridge: %v", err)
+	}
 	if applied {
 		defer func() {
 			if failed {
