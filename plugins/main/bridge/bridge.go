@@ -60,6 +60,7 @@ type NetConf struct {
 	Vlan         int    `json:"vlan"`
 	MacSpoofChk  bool   `json:"macspoofchk,omitempty"`
 	UplinkInterface string `json:"uplinkInterface"`
+	EnableIPv6   bool   `json:"enableIPv6"`
 
 	Args struct {
 		Cni BridgeArgs `json:"cni,omitempty"`
@@ -299,7 +300,7 @@ func copyAddress(from netlink.Link, to netlink.Link, family int) (bool, *netlink
 	return !foundAddr, &newAddr, nil
 }
 
-func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool, uplinkName string) (*netlink.Bridge, error) {
+func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool, uplinkName string, enableIPv6 bool) (*netlink.Bridge, error) {
 	br := &netlink.Bridge{
 		LinkAttrs: netlink.LinkAttrs{
 			Name: brName,
@@ -334,7 +335,14 @@ func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool, uplin
 	}
 
 	// we want to own the routes for this interface
-	_, _ = sysctl.Sysctl(fmt.Sprintf("net/ipv6/conf/%s/accept_ra", brName), "1")
+	if enableIPv6 {
+		_, _ = sysctl.Sysctl(fmt.Sprintf("net/ipv6/conf/%s/accept_ra", brName), "1")
+
+		_, err = sysctl.Sysctl(fmt.Sprintf("net/ipv6/conf/%s/forwarding", brName), "1")
+		if err != nil {
+			return nil, fmt.Errorf("could not enable IPv6 routing on '%s': %v", brName, err)
+		}
+	}
 
 	if err := netlink.LinkSetUp(br); err != nil {
 		return nil, err
@@ -496,7 +504,7 @@ func setupBridge(n *NetConf) (*netlink.Bridge, *current.Interface, error) {
 		vlanFiltering = true
 	}
 	// create bridge if necessary
-	br, err := ensureBridge(n.BrName, n.MTU, n.PromiscMode, vlanFiltering, n.UplinkInterface)
+	br, err := ensureBridge(n.BrName, n.MTU, n.PromiscMode, vlanFiltering, n.UplinkInterface, n.EnableIPv6)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create bridge %q: %v", n.BrName, err)
 	}
@@ -637,6 +645,22 @@ func cmdAdd(args *skel.CmdArgs) error {
 			if err := ipam.ConfigureIface(args.IfName, result); err != nil {
 				return err
 			}
+
+			if n.EnableIPv6 {
+				_, err = sysctl.Sysctl(fmt.Sprintf("net/ipv6/conf/%s/autoconf", args.IfName), "1")
+				if err != nil {
+					return fmt.Errorf("could not enable IPv6 autoconf on '%s': %v", args.IfName, err)
+				}
+				_, err = sysctl.Sysctl(fmt.Sprintf("net/ipv6/conf/%s/accept_ra", args.IfName), "1")
+				if err != nil {
+					return fmt.Errorf("could not enable IPv6 accept_ra on '%s': %v", args.IfName, err)
+				}
+				_, err = sysctl.Sysctl(fmt.Sprintf("net/ipv6/conf/%s/disable_ipv6", args.IfName), "0")
+				if err != nil {
+					return fmt.Errorf("could not enable IPv6 on '%s': %v", args.IfName, err)
+				}
+			}
+
 			return nil
 		}); err != nil {
 			return err
@@ -676,7 +700,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 			}
 			return nil
 		}); err != nil {
-			return err
+			return fmt.Errorf("failed to send gratuitous ARP: %v", err)
 		}
 
 		// Setup container routes
