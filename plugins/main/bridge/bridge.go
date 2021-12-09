@@ -375,6 +375,14 @@ func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool, uplin
 		}
 		return nil, fmt.Errorf("interface %s has already a master set: %s", uplinkName, master.Attrs().Name)
 	}
+
+	// https://backreference.org/2010/07/28/linux-bridge-mac-addresses-and-dynamic-ports/
+	err = netlink.LinkSetHardwareAddr(br, uplinkLink.Attrs().HardwareAddr)
+	if err != nil {
+		failed = true
+		return nil, fmt.Errorf("couldn't assign bridge MAC address to the same as the uplink interface: %v", err)
+	}
+
 	err = netlink.LinkSetMaster(uplinkLink, br)
 	if err != nil {
 		failed = true
