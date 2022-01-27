@@ -26,7 +26,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/j-keck/arping"
 	"github.com/vishvananda/netlink"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -449,6 +448,11 @@ func ensureVlanInterface(br *netlink.Bridge, vlanId int) (netlink.Link, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to lookup %q: %v", brGatewayIface.Name, err)
 		}
+
+		err = netlink.LinkSetUp(brGatewayVeth)
+		if err != nil {
+			return nil, fmt.Errorf("failed to up %q: %v", brGatewayIface.Name, err)
+		}
 	}
 
 	return brGatewayVeth, nil
@@ -649,6 +653,8 @@ func cmdAdd(args *skel.CmdArgs) error {
 				}
 			}
 
+			_, _ = sysctl.Sysctl(fmt.Sprintf("net/ipv4/conf/%s/arp_notify", args.IfName), "1")
+
 			// Add the IP to the interface
 			if err := ipam.ConfigureIface(args.IfName, result); err != nil {
 				return err
@@ -694,22 +700,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 		}
 
 		var contVeth *net.Interface
-		// Send a gratuitous arp
-		if err := netns.Do(func(_ ns.NetNS) error {
-			contVeth, err = net.InterfaceByName(args.IfName)
-			if err != nil {
-				return err
-			}
-
-			for _, ipc := range result.IPs {
-				if ipc.Address.IP.To4() != nil {
-					_ = arping.GratuitousArpOverIface(ipc.Address.IP, *contVeth)
-				}
-			}
-			return nil
-		}); err != nil {
-			return fmt.Errorf("failed to send gratuitous ARP: %v", err)
-		}
 
 		// Setup container routes
 		uplinkLink, err := netlink.LinkByName(n.UplinkInterface)
@@ -868,6 +858,20 @@ func cmdAdd(args *skel.CmdArgs) error {
 				}
 			}
 		}
+	} else {
+		if err := netns.Do(func(_ ns.NetNS) error {
+			link, err := netlink.LinkByName(args.IfName)
+			if err != nil {
+				return fmt.Errorf("failed to retrieve link: %v", err)
+			}
+			// If layer 2 we still need to set the container veth to up
+			if err = netlink.LinkSetUp(link); err != nil {
+				return fmt.Errorf("failed to set %q up: %v", args.IfName, err)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
 	}
 
 	// Refetch the bridge since its MAC address may change when the first
@@ -922,6 +926,13 @@ func cmdDel(args *skel.CmdArgs) error {
 	})
 
 	if err != nil {
+		//  if NetNs is passed down by the Cloud Orchestration Engine, or if it called multiple times
+		// so don't return an error if the device is already removed.
+		// https://github.com/kubernetes/kubernetes/issues/43014#issuecomment-287164444
+		_, ok := err.(ns.NSPathNotExistErr)
+		if ok {
+			return nil
+		}
 		return err
 	}
 
