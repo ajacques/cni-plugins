@@ -71,6 +71,8 @@ type DHCPLease struct {
 	// list of requesting and providing options and if they are necessary / their value
 	optsRequesting map[dhcp4.OptionCode]bool
 	optsProviding  map[dhcp4.OptionCode][]byte
+	k8sNamespace   string
+	k8sPodName     string
 }
 
 var requestOptionsDefault = map[dhcp4.OptionCode]bool{
@@ -143,7 +145,7 @@ func prepareOptions(cniArgs string, ProvideOptions []ProvideOption, RequestOptio
 // calling DHCPLease.Stop()
 func AcquireLease(
 	clientID, netns, ifName string,
-	optsRequesting map[dhcp4.OptionCode]bool, optsProviding map[dhcp4.OptionCode][]byte,
+	optsRequesting map[dhcp4.OptionCode]bool, optsProviding map[dhcp4.OptionCode][]byte, args IPAMArgs,
 	timeout, resendMax time.Duration, broadcast bool,
 ) (*DHCPLease, error) {
 	errCh := make(chan error, 1)
@@ -155,9 +157,11 @@ func AcquireLease(
 		broadcast:      broadcast,
 		optsRequesting: optsRequesting,
 		optsProviding:  optsProviding,
+		k8sNamespace:   string(args.K8S_POD_NAMESPACE),
+		k8sPodName:     string(args.K8S_POD_NAME),
 	}
 
-	log.Printf("%v: acquiring lease", clientID)
+	log.Printf("%v: acquiring lease (%s/%s)", clientID, l.k8sNamespace, l.k8sPodName)
 
 	l.wg.Add(1)
 	go func() {
