@@ -23,7 +23,6 @@ const (
 	// Endpoint and Network have InterfaceConstraint and ProviderAddress
 	NetworkProviderAddress     EndpointPolicyType = "ProviderAddress"
 	NetworkInterfaceConstraint EndpointPolicyType = "InterfaceConstraint"
-	TierAcl       EndpointPolicyType = "TierAcl"	
 )
 
 // EndpointPolicy is a collection of Policy settings for an Endpoint.
@@ -76,12 +75,6 @@ type SubnetPolicy struct {
 // NatFlags are flags for portmappings.
 type NatFlags uint32
 
-const (
-	NatFlagsNone NatFlags = iota
-	NatFlagsLocalRoutedVip
-	NatFlagsIPv6
-)
-
 /// Endpoint Policy objects
 
 // PortMappingPolicySetting defines Port Mapping (NAT)
@@ -107,8 +100,6 @@ const (
 	ActionTypeAllow ActionType = "Allow"
 	// Block traffic
 	ActionTypeBlock ActionType = "Block"
-	// Pass traffic
-	ActionTypePass ActionType = "Pass"
 
 	// In is traffic coming to the Endpoint
 	DirectionTypeIn DirectionType = "In"
@@ -144,7 +135,6 @@ type OutboundNatPolicySetting struct {
 	VirtualIP    string   `json:",omitempty"`
 	Exceptions   []string `json:",omitempty"`
 	Destinations []string `json:",omitempty"`
-	Flags        NatFlags `json:",omitempty"`
 }
 
 // SDNRoutePolicySetting sets SDN Route on an Endpoint.
@@ -164,20 +154,12 @@ type FiveTuple struct {
 	Priority        uint16 `json:",omitempty"`
 }
 
-// ProxyExceptions exempts traffic to IpAddresses and Ports
-type ProxyExceptions struct {
-	IpAddressExceptions []string `json:",omitempty"`
-	PortExceptions      []string `json:",omitempty"`
-}
-
 // L4WfpProxyPolicySetting sets Layer-4 Proxy on an endpoint.
 type L4WfpProxyPolicySetting struct {
-	InboundProxyPort   string          `json:",omitempty"`
-	OutboundProxyPort  string          `json:",omitempty"`
-	FilterTuple        FiveTuple       `json:",omitempty"`
-	UserSID            string          `json:",omitempty"`
-	InboundExceptions  ProxyExceptions `json:",omitempty"`
-	OutboundExceptions ProxyExceptions `json:",omitempty"`
+	InboundProxyPort  string    `json:",omitempty"`
+	OutboundProxyPort string    `json:",omitempty"`
+	FilterTuple       FiveTuple `json:",omitempty"`
+	UserSID           string    `json:",omitempty"`
 }
 
 // PortnameEndpointPolicySetting sets the port name for an endpoint.
@@ -306,24 +288,4 @@ type L4ProxyPolicySetting struct {
 	Exceptions  []string     `json:",omitempty"`
 	Destination string
 	OutboundNAT bool `json:",omitempty"`
-}
-
-// TierAclRule represents an ACL within TierAclPolicySetting
-type TierAclRule struct {
-	Id                string        `json:",omitempty"`
-	Protocols         string        `json:",omitempty"`
-	TierAclRuleAction ActionType    `json:","`
-	LocalAddresses    string        `json:",omitempty"`
-	RemoteAddresses   string        `json:",omitempty"`
-	LocalPorts        string        `json:",omitempty"`
-	RemotePorts       string        `json:",omitempty"`
-	Priority          uint16        `json:",omitempty"`
-}
-
-// TierAclPolicySetting represents a Tier containing ACLs
-type TierAclPolicySetting struct {
-	Name            string         `json:","`
-	Direction       DirectionType  `json:","`
-	Order           uint16         `json:""`
-	TierAclRules    []TierAclRule  `json:",omitempty"`
 }

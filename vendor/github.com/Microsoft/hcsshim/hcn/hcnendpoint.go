@@ -37,7 +37,6 @@ type HostComputeEndpoint struct {
 	Routes               []Route          `json:",omitempty"`
 	MacAddress           string           `json:",omitempty"`
 	Flags                EndpointFlags    `json:",omitempty"`
-	Health               Health           `json:",omitempty"`
 	SchemaVersion        SchemaVersion    `json:",omitempty"`
 }
 
@@ -57,13 +56,6 @@ type ModifyEndpointSettingRequest struct {
 	ResourceType EndpointResourceType `json:",omitempty"` // Policy, Port
 	RequestType  RequestType          `json:",omitempty"` // Add, Remove, Update, Refresh
 	Settings     json.RawMessage      `json:",omitempty"`
-}
-
-// VmEndpointRequest creates a switch port with identifier `PortId`.
-type VmEndpointRequest struct {
-	PortId           guid.GUID `json:",omitempty"`
-	VirtualNicName   string    `json:",omitempty"`
-	VirtualMachineId guid.GUID `json:",omitempty"`
 }
 
 type PolicyEndpointRequest struct {
