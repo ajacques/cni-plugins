@@ -112,8 +112,6 @@ func (d *DHCP) Allocate(args *skel.CmdArgs, result *current.Result) error {
 		return fmt.Errorf("failed to parse args: %v", err)
 	}
 
-	fmt.Printf("%+v\n", ipamArgs)
-
 	optsRequesting, optsProviding, err := prepareOptions(args.Args, conf.IPAM.ProvideOptions, conf.IPAM.RequestOptions)
 	if err != nil {
 		return err
