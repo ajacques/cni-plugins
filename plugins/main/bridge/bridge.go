@@ -48,18 +48,18 @@ const defaultBrName = "cni0"
 
 type NetConf struct {
 	types.NetConf
-	BrName       string `json:"bridge"`
-	IsGW         bool   `json:"isGateway"`
-	IsDefaultGW  bool   `json:"isDefaultGateway"`
-	ForceAddress bool   `json:"forceAddress"`
-	IPMasq       bool   `json:"ipMasq"`
-	MTU          int    `json:"mtu"`
-	HairpinMode  bool   `json:"hairpinMode"`
-	PromiscMode  bool   `json:"promiscMode"`
-	Vlan         int    `json:"vlan"`
-	MacSpoofChk  bool   `json:"macspoofchk,omitempty"`
+	BrName          string `json:"bridge"`
+	IsGW            bool   `json:"isGateway"`
+	IsDefaultGW     bool   `json:"isDefaultGateway"`
+	ForceAddress    bool   `json:"forceAddress"`
+	IPMasq          bool   `json:"ipMasq"`
+	MTU             int    `json:"mtu"`
+	HairpinMode     bool   `json:"hairpinMode"`
+	PromiscMode     bool   `json:"promiscMode"`
+	Vlan            int    `json:"vlan"`
+	MacSpoofChk     bool   `json:"macspoofchk,omitempty"`
 	UplinkInterface string `json:"uplinkInterface"`
-	EnableIPv6   bool   `json:"enableIPv6"`
+	EnableIPv6      bool   `json:"enableIPv6"`
 
 	Args struct {
 		Cni BridgeArgs `json:"cni,omitempty"`
@@ -285,10 +285,10 @@ func copyAddress(from netlink.Link, to netlink.Link, family int) (bool, *netlink
 		}
 	}
 	newAddr := netlink.Addr{
-		IPNet: oldAddr.IPNet,
-		Scope: oldAddr.Scope,
+		IPNet:       oldAddr.IPNet,
+		Scope:       oldAddr.Scope,
 		PreferedLft: oldAddr.PreferedLft,
-		ValidLft: oldAddr.ValidLft,
+		ValidLft:    oldAddr.ValidLft,
 	}
 	if !foundAddr {
 		err = netlink.AddrAdd(to, &newAddr)
@@ -700,9 +700,19 @@ func cmdAdd(args *skel.CmdArgs) error {
 		}
 
 		var contVeth *net.Interface
+		// Send a gratuitous arp
+		if err := netns.Do(func(_ ns.NetNS) error {
+			contVeth, err = net.InterfaceByName(args.IfName)
+			if err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("failed to send gratuitous ARP: %v", err)
+		}
 
 		// Setup container routes
-		uplinkLink, err := netlink.LinkByName(n.UplinkInterface)
+		uplinkLink, err := netlink.LinkByName("cni0")
 		if err != nil {
 			return fmt.Errorf("couldn't find uplink interface '%s': %v", n.UplinkInterface, err)
 		}
@@ -739,17 +749,19 @@ func cmdAdd(args *skel.CmdArgs) error {
 				Dst:       netlink.NewIPNet(gwIp),
 			})
 			if err != nil {
-				return err
+				return fmt.Errorf("couldn't create ipv4 route in container to host: %v", err)
 			}
 
-			err = netlink.RouteAdd(&netlink.Route{
-				LinkIndex: containerLink.Attrs().Index,
-				Scope:     netlink.SCOPE_LINK,
-				Dst:       netlink.NewIPNet(uplink6Addrs[0].IP),
-			})
+			if n.EnableIPv6 {
+				err = netlink.RouteAdd(&netlink.Route{
+					LinkIndex: containerLink.Attrs().Index,
+					Scope:     netlink.SCOPE_LINK,
+					Dst:       netlink.NewIPNet(uplink6Addrs[0].IP),
+				})
 
-			if err != nil {
-				return err
+				if err != nil {
+					return fmt.Errorf("couldn't create ipv6 route in container to host for ip (%s): %v", uplink6Addrs[0].IP, err)
+				}
 			}
 
 			err = netlink.RouteAdd(&netlink.Route{
@@ -759,7 +771,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 			})
 
 			if err != nil {
-				return err
+				return fmt.Errorf("couldn't default ipv4 route in container: %v", err)
 			}
 
 			brMac, err := net.ParseMAC(brInterface.Mac)
@@ -771,7 +783,11 @@ func cmdAdd(args *skel.CmdArgs) error {
 				HardwareAddr: brMac,
 			})
 
-			return err
+			if err != nil {
+				return fmt.Errorf("couldn't create IPv4 ARP entry on host: %v", err)
+			}
+
+			return nil
 		})
 		if err != nil {
 			return err
@@ -781,8 +797,8 @@ func cmdAdd(args *skel.CmdArgs) error {
 		for _, ip := range ipamResult.IPs {
 			err = netlink.RouteAdd(&netlink.Route{
 				LinkIndex: hostVeth.Attrs().Index,
-				Dst: netlink.NewIPNet(ip.Address.IP),
-				Scope: netlink.SCOPE_LINK,
+				Dst:       netlink.NewIPNet(ip.Address.IP),
+				Scope:     netlink.SCOPE_LINK,
 			})
 
 			if err != nil {
@@ -790,10 +806,10 @@ func cmdAdd(args *skel.CmdArgs) error {
 			}
 
 			err = netlink.NeighSet(&netlink.Neigh{
-				LinkIndex: hostVeth.Attrs().Index,
-				Family: netlink.FAMILY_V4,
-				State: netlink.NUD_PERMANENT,
-				IP: ip.Address.IP,
+				LinkIndex:    hostVeth.Attrs().Index,
+				Family:       netlink.FAMILY_V4,
+				State:        netlink.NUD_PERMANENT,
+				IP:           ip.Address.IP,
 				HardwareAddr: contVeth.HardwareAddr,
 			})
 			if err != nil {
