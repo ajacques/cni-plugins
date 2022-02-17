@@ -137,3 +137,15 @@ func InsertUnique(ipt *iptables.IPTables, table, chain string, prepend bool, rul
 		return ipt.Append(table, chain, rule...)
 	}
 }
+
+func GenerateFilterRule(privChainName string) []string {
+	return []string{"-m", "comment", "--comment", "CNI firewall plugin rules", "-j", privChainName}
+}
+
+func EnsureFirstChainRule(ipt *iptables.IPTables, chain string, rule []string) error {
+	exists, err := ipt.Exists("filter", chain, rule...)
+	if !exists && err == nil {
+		err = ipt.Insert("filter", chain, 1, rule...)
+	}
+	return err
+}

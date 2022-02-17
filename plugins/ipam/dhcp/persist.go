@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"time"
 
+	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/d2g/dhcp4"
 	"github.com/vishvananda/netlink"
 )
@@ -19,6 +21,7 @@ type PersistedLeased struct {
 	ExpireTime    time.Time
 	K8sNamespace  string
 	K8sPodName    string
+	NetNs         string
 }
 
 func LoadSavedLeases(leaseFile string, timeout time.Duration, resendMax time.Duration, broadcast bool) ([]*DHCPLease, error) {
@@ -34,14 +37,9 @@ func LoadSavedLeases(leaseFile string, timeout time.Duration, resendMax time.Dur
 	var reloadedLeases []*DHCPLease
 
 	for _, lease := range leases {
-		link, err := netlink.LinkByName(lease.LinkName)
-		if err != nil {
-			return nil, err
-		}
 		myLease := &DHCPLease{
 			clientID:      lease.ClientID,
 			ack:           lease.Ack,
-			link:          link,
 			renewalTime:   lease.RenewalTime,
 			rebindingTime: lease.RebindingTime,
 			expireTime:    lease.ExpireTime,
@@ -51,6 +49,20 @@ func LoadSavedLeases(leaseFile string, timeout time.Duration, resendMax time.Dur
 			stop:          make(chan struct{}),
 			k8sNamespace:  lease.K8sNamespace,
 			k8sPodName:    lease.K8sPodName,
+			netNs:         lease.NetNs,
+		}
+		err := ns.WithNetNSPath(myLease.netNs, func(_ ns.NetNS) error {
+			link, err := netlink.LinkByName(lease.LinkName)
+			if err != nil {
+				return fmt.Errorf("error looking up %q: %v", lease.LinkName, err)
+			}
+
+			myLease.link = link
+
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("couldn't look up link '%s' in container netns '%s': %v", lease.LinkName, lease.NetNs, err)
 		}
 		reloadedLeases = append(reloadedLeases, myLease)
 	}
@@ -71,6 +83,7 @@ func PersistActiveLeases(fileName string, leases map[string]*DHCPLease) error {
 			ExpireTime:    v.expireTime,
 			K8sNamespace:  v.k8sNamespace,
 			K8sPodName:    v.k8sPodName,
+			NetNs:         v.netNs,
 		}
 		leasesToSave = append(leasesToSave, value)
 	}

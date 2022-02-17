@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -57,7 +58,7 @@ type NetConf struct {
 	PromiscMode     bool   `json:"promiscMode"`
 	Vlan            int    `json:"vlan"`
 	MacSpoofChk     bool   `json:"macspoofchk,omitempty"`
-	EnableDad    bool   `json:"enabledad,omitempty"`
+	EnableDad       bool   `json:"enabledad,omitempty"`
 	UplinkInterface string `json:"uplinkInterface"`
 	EnableIPv6      bool   `json:"enableIPv6"`
 
@@ -534,6 +535,46 @@ func enableIPForward(family int) error {
 	return ip.EnableIP6Forward()
 }
 
+func createBaselineRules(brName string) [][]string {
+	rules := make([][]string, 0)
+
+	// TODO: Use marking to track exactly which interface
+
+	rules = append(rules, []string{"-i", "cni0", "-j", "ACCEPT"})
+
+	return rules
+}
+
+func setupFirewallRules(ipt *iptables.IPTables, vethName string) error {
+	rules := make([][]string, 0)
+	err := utils.EnsureChain(ipt, "filter", "CNI-FORWARD")
+	if err != nil {
+		return fmt.Errorf("failed to create chain: %v", err)
+	}
+
+	err = utils.EnsureFirstChainRule(ipt, "FORWARD", utils.GenerateFilterRule("CNI-FORWARD"))
+	if err != nil {
+		return err
+	}
+
+	rules = append(rules, createBaselineRules(vethName)...)
+
+	for _, rule := range rules {
+		err = ipt.AppendUnique("filter", "CNI-FORWARD", rule...)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func cleanupRules(ipt *iptables.IPTables, rules [][]string) {
+	for _, rule := range rules {
+		ipt.Delete("filter", "CNI-FORWARD", rule...)
+	}
+}
+
 func cmdAdd(args *skel.CmdArgs) error {
 	var success bool = false
 
@@ -592,10 +633,21 @@ func cmdAdd(args *skel.CmdArgs) error {
 		}()
 	}
 
+	ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4)
+	if err != nil {
+		return fmt.Errorf("failed to open IPTables: %v", err)
+	}
+
 	if isLayer3 {
+		err = setupFirewallRules(ipt, hostInterface.Name)
+		if err != nil {
+			return fmt.Errorf("couldn't setup firewall rules: %v", err)
+		}
+
 		// run the IPAM plugin and get back the config to apply
 		r, err := ipam.ExecAdd(n.IPAM.Type, args.StdinData)
 		if err != nil {
+			success = false
 			return err
 		}
 
@@ -680,8 +732,8 @@ func cmdAdd(args *skel.CmdArgs) error {
 		}
 
 		var contVeth *net.Interface
-		// Send a gratuitous arp
 		if err := netns.Do(func(_ ns.NetNS) error {
+			// Send a gratuitous arp
 			contVeth, err = net.InterfaceByName(args.IfName)
 			if err != nil {
 				return err
@@ -701,9 +753,13 @@ func cmdAdd(args *skel.CmdArgs) error {
 		if err != nil {
 			return fmt.Errorf("couldn't find IPv4 addresses for uplink interface: %v", err)
 		}
-		uplink6Addrs, err := netlink.AddrList(uplinkLink, netlink.FAMILY_V6)
-		if err != nil {
-			return fmt.Errorf("couldn't find IPv6 addresses for uplink interface: %v", err)
+		var gw6Ip net.IP
+		if n.EnableIPv6 {
+			uplink6Addrs, err := netlink.AddrList(uplinkLink, netlink.FAMILY_V6)
+			if err != nil {
+				return fmt.Errorf("couldn't find IPv6 addresses for uplink interface: %v", err)
+			}
+			gw6Ip = uplink6Addrs[0].IP
 		}
 
 		gwIp := uplinkAddrs[0].IP
@@ -723,11 +779,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 			// Add the local scope
 			// This tells the container to forward everything to the host stack
-			err = netlink.RouteAdd(&netlink.Route{
-				LinkIndex: containerLink.Attrs().Index,
-				Scope:     netlink.SCOPE_LINK,
-				Dst:       netlink.NewIPNet(gwIp),
-			})
+			err = addRouteToHost(containerLink, gwIp, ipamResult.IPs[0].Address.IP)
 			if err != nil {
 				return fmt.Errorf("couldn't create ipv4 route in container to host: %v", err)
 			}
@@ -736,22 +788,12 @@ func cmdAdd(args *skel.CmdArgs) error {
 				err = netlink.RouteAdd(&netlink.Route{
 					LinkIndex: containerLink.Attrs().Index,
 					Scope:     netlink.SCOPE_LINK,
-					Dst:       netlink.NewIPNet(uplink6Addrs[0].IP),
+					Dst:       netlink.NewIPNet(gw6Ip),
 				})
 
 				if err != nil {
-					return fmt.Errorf("couldn't create ipv6 route in container to host for ip (%s): %v", uplink6Addrs[0].IP, err)
+					return fmt.Errorf("couldn't create ipv6 route in container to host for ip (%s): %v", gw6Ip, err)
 				}
-			}
-
-			err = netlink.RouteAdd(&netlink.Route{
-				LinkIndex: containerLink.Attrs().Index,
-				Gw:        gwIp,
-				Src:       ipamResult.IPs[0].Address.IP,
-			})
-
-			if err != nil {
-				return fmt.Errorf("couldn't default ipv4 route in container: %v", err)
 			}
 
 			brMac, err := net.ParseMAC(brInterface.Mac)
@@ -764,36 +806,36 @@ func cmdAdd(args *skel.CmdArgs) error {
 			})
 
 			if err != nil {
-				return fmt.Errorf("couldn't create IPv4 ARP entry on host: %v", err)
+				return fmt.Errorf("failed to add permanent neighbor of bridge to container interface: %v", err)
 			}
 
 			return nil
 		})
 		if err != nil {
-			return err
+			return fmt.Errorf("couldn't setup container routes: %v", err)
 		}
 
 		// Configure route from host to container
-		for _, ip := range ipamResult.IPs {
+		for _, containerIp := range ipamResult.IPs {
+			err = netlink.NeighSet(&netlink.Neigh{
+				LinkIndex:    hostVeth.Attrs().Index,
+				Family:       netlink.FAMILY_V4,
+				State:        netlink.NUD_PERMANENT,
+				IP:           containerIp.Address.IP,
+				HardwareAddr: contVeth.HardwareAddr,
+			})
+			if err != nil {
+				return fmt.Errorf("couldn't add ARP route from host to container: %v", err)
+			}
+
 			err = netlink.RouteAdd(&netlink.Route{
 				LinkIndex: hostVeth.Attrs().Index,
-				Dst:       netlink.NewIPNet(ip.Address.IP),
+				Dst:       netlink.NewIPNet(containerIp.Address.IP),
 				Scope:     netlink.SCOPE_LINK,
 			})
 
 			if err != nil {
 				return fmt.Errorf("couldn't route from host to container: %v", err)
-			}
-
-			err = netlink.NeighSet(&netlink.Neigh{
-				LinkIndex:    hostVeth.Attrs().Index,
-				Family:       netlink.FAMILY_V4,
-				State:        netlink.NUD_PERMANENT,
-				IP:           ip.Address.IP,
-				HardwareAddr: contVeth.HardwareAddr,
-			})
-			if err != nil {
-				return fmt.Errorf("couldn't add ARP route from host to container: %v", err)
 			}
 		}
 
@@ -890,6 +932,29 @@ func cmdAdd(args *skel.CmdArgs) error {
 	return types.PrintResult(result, cniVersion)
 }
 
+func addRouteToHost(containerLink netlink.Link, gwIp net.IP, srcAddress net.IP) error {
+	err := netlink.RouteAdd(&netlink.Route{
+		LinkIndex: containerLink.Attrs().Index,
+
+		Scope: netlink.SCOPE_LINK,
+		Dst:   netlink.NewIPNet(gwIp),
+	})
+	if err != nil {
+		return nil
+	}
+	err = netlink.RouteAdd(&netlink.Route{
+		LinkIndex: containerLink.Attrs().Index,
+		Gw:        gwIp,
+		Src:       srcAddress,
+	})
+
+	if err != nil {
+		return nil
+	}
+
+	return nil
+}
+
 func cmdDel(args *skel.CmdArgs) error {
 	n, _, err := loadNetConf(args.StdinData, args.Args)
 	if err != nil {
@@ -907,6 +972,41 @@ func cmdDel(args *skel.CmdArgs) error {
 	if args.Netns == "" {
 		return nil
 	}
+
+	/*json, _ := json.MarshalIndent(args, "", " ")
+
+	f, err := os.Create("/tmp/cni.json")
+	defer f.Close()
+	f.Write(json)
+
+	// Parse previous result.
+	if n.RawPrevResult != nil {
+		f.WriteString("\nFound RawPrevResult")
+		// Parse previous result.
+		var result *current.Result
+		var err error
+		if err = version.ParsePrevResult(&n.NetConf); err != nil {
+			f.WriteString(fmt.Sprintf("\n%v", err))
+			return fmt.Errorf("could not parse prevResult: %v", err)
+		}
+		f.WriteString("\nParsed")
+
+		result, err = current.NewResultFromResult(n.PrevResult)
+		if err != nil {
+			f.WriteString(fmt.Sprintf("\n%v", err))
+			return fmt.Errorf("could not convert result to current version: %v", err)
+		}
+		f.WriteString("Made Result")
+		ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4)
+		if err != nil {
+			f.WriteString(fmt.Sprintf("\n%v", err))
+			return fmt.Errorf("failed to open IPTables: %v", err)
+		}
+
+		cleanupRules(ipt, createBaselineRules(result.Interfaces[1].Name))
+	} else {
+		f.WriteString("\nDidn't find RawPrevResult. WTF")
+	}*/
 
 	// There is a netns so try to clean up. Delete can be called multiple times
 	// so don't return an error if the device is already removed.

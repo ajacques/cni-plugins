@@ -82,6 +82,7 @@ func newDHCP(clientTimeout, clientResendMax time.Duration, broadcast bool, k8s v
 				return nil, err
 			}
 		}
+		val.StartMaintaining()
 		dhcp.setLease(val.clientID, val)
 	}
 
@@ -258,6 +259,12 @@ func runDaemon(
 	}
 	dhcp.hostNetnsPrefix = hostPrefix
 	dhcp.broadcast = broadcast
+
+	if err = SetNodeIsOfflineState(clientset, false); err != nil {
+		return err
+	}
+	fmt.Println("Daemon ready to receive requests")
+
 	rpc.Register(dhcp)
 	rpc.HandleHTTP()
 	http.Serve(l, nil)

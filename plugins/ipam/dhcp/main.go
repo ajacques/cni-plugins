@@ -71,28 +71,35 @@ type RequestOption struct {
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "daemon" {
-		var pidfilePath string
-		var hostPrefix string
-		var socketPath string
-		var broadcast bool
-		var timeout time.Duration
-		var resendMax time.Duration
-		daemonFlags := flag.NewFlagSet("daemon", flag.ExitOnError)
-		daemonFlags.StringVar(&pidfilePath, "pidfile", "", "optional path to write daemon PID to")
-		daemonFlags.StringVar(&hostPrefix, "hostprefix", "", "optional prefix to host root")
-		daemonFlags.StringVar(&socketPath, "socketpath", "", "optional dhcp server socketpath")
-		daemonFlags.BoolVar(&broadcast, "broadcast", false, "broadcast DHCP leases")
-		daemonFlags.DurationVar(&timeout, "timeout", 10*time.Second, "optional dhcp client timeout duration")
-		daemonFlags.DurationVar(&resendMax, "resendmax", resendDelayMax, "optional dhcp client resend max duration")
-		daemonFlags.Parse(os.Args[2:])
+	if len(os.Args) > 1 {
+		if os.Args[1] == "daemon" {
+			var pidfilePath string
+			var hostPrefix string
+			var socketPath string
+			var broadcast bool
+			var timeout time.Duration
+			var resendMax time.Duration
+			daemonFlags := flag.NewFlagSet("daemon", flag.ExitOnError)
+			daemonFlags.StringVar(&pidfilePath, "pidfile", "", "optional path to write daemon PID to")
+			daemonFlags.StringVar(&hostPrefix, "hostprefix", "", "optional prefix to host root")
+			daemonFlags.StringVar(&socketPath, "socketpath", "", "optional dhcp server socketpath")
+			daemonFlags.BoolVar(&broadcast, "broadcast", false, "broadcast DHCP leases")
+			daemonFlags.DurationVar(&timeout, "timeout", 10*time.Second, "optional dhcp client timeout duration")
+			daemonFlags.DurationVar(&resendMax, "resendmax", resendDelayMax, "optional dhcp client resend max duration")
+			daemonFlags.Parse(os.Args[2:])
 
-		if socketPath == "" {
-			socketPath = defaultSocketPath
-		}
+			if socketPath == "" {
+				socketPath = defaultSocketPath
+			}
 
-		if err := runDaemon(pidfilePath, hostPrefix, socketPath, timeout, resendMax, broadcast); err != nil {
-			log.Print(err.Error())
+			if err := runDaemon(pidfilePath, hostPrefix, socketPath, timeout, resendMax, broadcast); err != nil {
+				log.Print(err.Error())
+				os.Exit(1)
+			}
+		} else if os.Args[1] == "shutdown" {
+			shutdown()
+		} else {
+			log.Print("Unrecognized command")
 			os.Exit(1)
 		}
 	} else {

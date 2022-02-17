@@ -73,6 +73,8 @@ type DHCPLease struct {
 	optsProviding  map[dhcp4.OptionCode][]byte
 	k8sNamespace   string
 	k8sPodName     string
+	netNs          string
+	interfaceName  string
 }
 
 var requestOptionsDefault = map[dhcp4.OptionCode]bool{
@@ -148,7 +150,6 @@ func AcquireLease(
 	optsRequesting map[dhcp4.OptionCode]bool, optsProviding map[dhcp4.OptionCode][]byte, args IPAMArgs,
 	timeout, resendMax time.Duration, broadcast bool,
 ) (*DHCPLease, error) {
-	errCh := make(chan error, 1)
 	l := &DHCPLease{
 		clientID:       clientID,
 		stop:           make(chan struct{}),
@@ -157,29 +158,47 @@ func AcquireLease(
 		broadcast:      broadcast,
 		optsRequesting: optsRequesting,
 		optsProviding:  optsProviding,
+		netNs:          netns,
 		k8sNamespace:   string(args.K8S_POD_NAMESPACE),
 		k8sPodName:     string(args.K8S_POD_NAME),
 	}
 
 	log.Printf("%v: acquiring lease (%s/%s)", clientID, l.k8sNamespace, l.k8sPodName)
 
+	err := ns.WithNetNSPath(l.netNs, func(_ ns.NetNS) error {
+		link, err := netlink.LinkByName(ifName)
+		if err != nil {
+			return fmt.Errorf("error looking up %q: %v", l.interfaceName, err)
+		}
+
+		l.link = link
+
+		if err = l.acquire(); err != nil {
+			return err
+		}
+		log.Printf("%v: lease acquired, expiration is %v", l.clientID, l.expireTime)
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	err = l.StartMaintaining()
+
+	if err != nil {
+		return nil, err
+	}
+
+	return l, nil
+}
+
+func (l *DHCPLease) StartMaintaining() error {
+	errCh := make(chan error, 1)
 	l.wg.Add(1)
+
 	go func() {
-		errCh <- ns.WithNetNSPath(netns, func(_ ns.NetNS) error {
+		errCh <- ns.WithNetNSPath(l.netNs, func(_ ns.NetNS) error {
 			defer l.wg.Done()
-
-			link, err := netlink.LinkByName(ifName)
-			if err != nil {
-				return fmt.Errorf("error looking up %q: %v", ifName, err)
-			}
-
-			l.link = link
-
-			if err = l.acquire(); err != nil {
-				return err
-			}
-
-			log.Printf("%v: lease acquired, expiration is %v", l.clientID, l.expireTime)
 
 			errCh <- nil
 
@@ -189,10 +208,10 @@ func AcquireLease(
 	}()
 
 	if err := <-errCh; err != nil {
-		return nil, err
+		return err
 	}
 
-	return l, nil
+	return nil
 }
 
 // Stop terminates the background task that maintains the lease
