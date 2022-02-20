@@ -62,7 +62,12 @@ func LoadSavedLeases(leaseFile string, timeout time.Duration, resendMax time.Dur
 			return nil
 		})
 		if err != nil {
-			return nil, fmt.Errorf("couldn't look up link '%s' in container netns '%s': %v", lease.LinkName, lease.NetNs, err)
+			if _, ok := err.(ns.NSPathNotExistErr); ok {
+				fmt.Printf("Container %s/%s does not seem to have a working netns. Skipping", lease.K8sNamespace, lease.K8sPodName)
+				continue
+			} else {
+				return nil, fmt.Errorf("couldn't look up link '%s' in container netns '%s': %v", lease.LinkName, lease.NetNs, err)
+			}
 		}
 		reloadedLeases = append(reloadedLeases, myLease)
 	}

@@ -63,12 +63,15 @@ type IPAMArgs struct {
 }
 
 func newDHCP(clientTimeout, clientResendMax time.Duration, broadcast bool, k8s v1.CoreV1Interface) (*DHCP, error) {
-	leases, _ := LoadSavedLeases(savedLeaseLocation, clientTimeout, clientResendMax, broadcast)
+	leases, err := LoadSavedLeases(savedLeaseLocation, clientTimeout, clientResendMax, broadcast)
 	dhcp := &DHCP{
 		leases:          make(map[string]*DHCPLease),
 		clientTimeout:   clientTimeout,
 		clientResendMax: clientResendMax,
 		k8sClient:       k8s,
+	}
+	if err != nil {
+		fmt.Printf("Failed to load leases: %v%n", err)
 	}
 
 	for _, val := range leases {
@@ -82,8 +85,16 @@ func newDHCP(clientTimeout, clientResendMax time.Duration, broadcast bool, k8s v
 				return nil, err
 			}
 		}
-		val.StartMaintaining()
 		dhcp.setLease(val.clientID, val)
+		err := val.StartMaintaining()
+		if err != nil {
+			return nil, fmt.Errorf("failed to start maintaining lease: %v", err)
+		}
+	}
+
+	err = PersistActiveLeases(savedLeaseLocation, dhcp.leases)
+	if err != nil {
+		return nil, err
 	}
 
 	return dhcp, nil
@@ -137,6 +148,7 @@ func (d *DHCP) Allocate(args *skel.CmdArgs, result *current.Result) error {
 
 	err = PersistActiveLeases(savedLeaseLocation, d.leases)
 	if err != nil {
+		fmt.Printf("Failed to persist: %v", err)
 		return err
 	}
 
@@ -193,6 +205,11 @@ func (d *DHCP) clearLease(clientID string) {
 
 	// TODO(eyakubovich): hash it to avoid collisions
 	delete(d.leases, clientID)
+
+	err := PersistActiveLeases(savedLeaseLocation, d.leases)
+	if err != nil {
+		fmt.Printf("Failed to persist: %v", err)
+	}
 }
 
 func getListener(socketPath string) (net.Listener, error) {
