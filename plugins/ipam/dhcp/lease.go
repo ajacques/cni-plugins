@@ -238,7 +238,8 @@ func (l *DHCPLease) acquire() error {
 	}
 
 	opts := make(dhcp4.Options)
-	opts[dhcp4.OptionClientIdentifier] = []byte(l.clientID)
+	// client identifier's first byte is "type"
+	opts[dhcp4.OptionClientIdentifier] = []byte("\000" + l.clientID)
 	opts[dhcp4.OptionParameterRequestList] = []byte{}
 	for k := range l.optsRequesting {
 		opts[dhcp4.OptionParameterRequestList] = append(opts[dhcp4.OptionParameterRequestList], byte(k))
@@ -246,10 +247,6 @@ func (l *DHCPLease) acquire() error {
 	for k, v := range l.optsProviding {
 		opts[k] = v
 	}
-	// client identifier's first byte is "type"
-	newClientID := []byte{0}
-	newClientID = append(newClientID, opts[dhcp4.OptionClientIdentifier]...)
-	opts[dhcp4.OptionClientIdentifier] = newClientID
 
 	pkt, err := backoffRetry(l.resendMax, func() (*dhcp4.Packet, error) {
 		ok, ack, err := DhcpRequest(c, opts)
@@ -319,7 +316,7 @@ func (l *DHCPLease) maintain() {
 				log.Printf("%v: %v", l.clientID, err)
 
 				if time.Now().After(l.rebindingTime) {
-					log.Printf("%v: renawal time expired, rebinding", l.clientID)
+					log.Printf("%v: renewal time expired, rebinding", l.clientID)
 					state = leaseStateRebinding
 				}
 			} else {
@@ -368,7 +365,7 @@ func (l *DHCPLease) renew() error {
 	defer c.Close()
 
 	opts := make(dhcp4.Options)
-	opts[dhcp4.OptionClientIdentifier] = []byte(l.clientID)
+	opts[dhcp4.OptionClientIdentifier] = []byte("\000" + l.clientID)
 
 	pkt, err := backoffRetry(l.resendMax, func() (*dhcp4.Packet, error) {
 		ok, ack, err := DhcpRenew(c, *l.ack, opts)
@@ -376,7 +373,7 @@ func (l *DHCPLease) renew() error {
 		case err != nil:
 			return nil, err
 		case !ok:
-			return nil, fmt.Errorf("DHCP server did not renew lease")
+			return nil, fmt.Errorf("DHCP server did not renew lease: %v", err)
 		default:
 			return &ack, nil
 		}
@@ -399,7 +396,7 @@ func (l *DHCPLease) release() error {
 	defer c.Close()
 
 	opts := make(dhcp4.Options)
-	opts[dhcp4.OptionClientIdentifier] = []byte(l.clientID)
+	opts[dhcp4.OptionClientIdentifier] = []byte("\000" + l.clientID)
 
 	if err = DhcpRelease(c, *l.ack, opts); err != nil {
 		return fmt.Errorf("failed to send DHCPRELEASE")

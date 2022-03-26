@@ -15,6 +15,8 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/d2g/dhcp4"
 	"github.com/d2g/dhcp4client"
 )
@@ -114,7 +116,8 @@ func DhcpRenew(c *dhcp4client.Client, acknowledgement dhcp4.Packet, options dhcp
 
 	newAcknowledgementOptions := newAcknowledgement.ParseOptions()
 	if dhcp4.MessageType(newAcknowledgementOptions[dhcp4.OptionDHCPMessageType][0]) != dhcp4.ACK {
-		return false, newAcknowledgement, nil
+		msg := newAcknowledgementOptions[dhcp4.OptionMessage]
+		return false, newAcknowledgement, fmt.Errorf("dhcp server responded: %s", msg)
 	}
 
 	return true, newAcknowledgement, nil
