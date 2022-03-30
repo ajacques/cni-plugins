@@ -366,6 +366,7 @@ func (l *DHCPLease) renew() error {
 
 	opts := make(dhcp4.Options)
 	opts[dhcp4.OptionClientIdentifier] = []byte("\000" + l.clientID)
+	opts[dhcp4.OptionHostName] = []byte(l.k8sPodName)
 
 	pkt, err := backoffRetry(l.resendMax, func() (*dhcp4.Packet, error) {
 		ok, ack, err := DhcpRenew(c, *l.ack, opts)
