@@ -43,26 +43,6 @@ func parseConfig(stdin []byte) (*PluginConf, error) {
 	return &conf, nil
 }
 
-func getContainerInterface(interfaces []*current.Interface) (netlink.Link, error) {
-	var err error
-	var containerIFName string
-	for _, netif := range interfaces {
-		if netif.Sandbox != "" {
-			containerIFName = netif.Name
-			link, _ := netlink.LinkByName(netif.Name)
-			routes, _ := netlink.RouteList(link, netlink.FAMILY_ALL)
-			for _, route := range routes {
-				err = netlink.RouteDel(&route)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-
-	return netlink.LinkByName(containerIFName)
-}
-
 // cmdAdd is called for ADD requests
 func cmdAdd(args *skel.CmdArgs) error {
 	conf, err := parseConfig(args.StdinData)
@@ -101,100 +81,51 @@ func cmdAdd(args *skel.CmdArgs) error {
 	netns, _ := ns.GetNS(args.Netns)
 	defer netns.Close()
 
-	linkName := "mac0"
-
-	macLink, err := netlink.LinkByName(linkName)
-	if err != nil {
-		return err
-	}
-
-	addrs, err := netlink.AddrList(macLink, netlink.FAMILY_V4)
-	if err != nil {
-		return fmt.Errorf("couldn't get addrs for interface '%s': %v", linkName, err)
-	}
-	gwIp := net.IPv4(169, 254, 1, 1)
-	foundAddr := false
-	for _, addr := range addrs {
-		if addr.IP.Equal(gwIp) {
-			foundAddr = true
-			break
-		}
-	}
-	if !foundAddr {
-		err := netlink.AddrAdd(macLink, &netlink.Addr{
-			IPNet: netlink.NewIPNet(gwIp),
-		})
-		if err != nil {
-			return err
-		}
-	}
-
-	containerIp := prevResult.IPs[0].Address.IP
-	containerMac, err := net.ParseMAC(prevResult.Interfaces[0].Mac)
-	if err != nil {
-		return fmt.Errorf("couldn't parse MAC '%s': %v", prevResult.Interfaces[0].Mac, err)
-	}
+	linkName := prevResult.Interfaces[2].Name
+	containerNet := prevResult.IPs[0].Address
 
 	err = netns.Do(func(_ ns.NetNS) error {
-		dev, err := getContainerInterface(result.Interfaces)
+		containerLink, err := netlink.LinkByName(linkName)
 		if err != nil {
-			return err
+			return fmt.Errorf("couldn't find link (%s) in container netns: %v", linkName, err)
 		}
 
-		// Add the local scope
-		// This tells the container to forward everything to the host stack
-		err = netlink.RouteAdd(&netlink.Route{
-			LinkIndex: dev.Attrs().Index,
+		route := &netlink.Route{
+			LinkIndex: containerLink.Attrs().Index,
 			Scope:     netlink.SCOPE_LINK,
-			Dst:       netlink.NewIPNet(gwIp),
-		})
+			Src:       containerNet.IP,
+			Dst: &net.IPNet{
+				IP:   containerNet.IP.Mask(containerNet.Mask),
+				Mask: containerNet.Mask,
+			},
+		}
+
+		err = netlink.RouteAdd(route)
+		if err != nil {
+			return fmt.Errorf("couldn't create route (%s) in container: %v", route, err)
+		}
+
+		_, i, err := net.ParseCIDR("224.0.0.0/4")
 		if err != nil {
 			return err
 		}
 
-		err = netlink.RouteAdd(&netlink.Route{
-			LinkIndex: dev.Attrs().Index,
-			Gw:        gwIp,
-			Src:       prevResult.IPs[0].Address.IP,
-		})
-
-		if err != nil {
-			return err
+		mcastroute := &netlink.Route{
+			LinkIndex: containerLink.Attrs().Index,
+			Scope:     netlink.SCOPE_LINK,
+			Src:       containerNet.IP,
+			Dst:       i,
 		}
 
-		err = netlink.NeighSet(&netlink.Neigh{
-			LinkIndex: dev.Attrs().Index,
-			Family: netlink.FAMILY_V4,
-			State: netlink.NUD_PERMANENT,
-			IP: gwIp,
-			HardwareAddr: macLink.Attrs().HardwareAddr,
-		})
+		err = netlink.RouteAdd(mcastroute)
+		if err != nil {
+			return fmt.Errorf("couldn't create route (%s) in container: %v", mcastroute, err)
+		}
 
-		return err
+		return nil
 	})
 	if err != nil {
 		return err
-	}
-
-	err = netlink.RouteAdd(&netlink.Route{
-		LinkIndex: macLink.Attrs().Index,
-		Dst: netlink.NewIPNet(containerIp),
-		Scope: netlink.SCOPE_LINK,
-	})
-
-	if err != nil {
-		return fmt.Errorf("couldn't route from host to container: %v", err)
-	}
-
-	err = netlink.NeighSet(&netlink.Neigh{
-		LinkIndex: macLink.Attrs().Index,
-		Family: netlink.FAMILY_V4,
-		State: netlink.NUD_PERMANENT,
-		IP: containerIp,
-		HardwareAddr: containerMac,
-	})
-	if err != nil {
-		return fmt.Errorf("couldn't add ARP route from host to container: %v", err)
 	}
 
 	// Pass through the result for the next plugin
@@ -213,36 +144,6 @@ func cmdDel(args *skel.CmdArgs) error {
 		return err
 	}
 	defer netns.Close()
-
-	var mainIp net.IP
-
-	err = netns.Do(func(_ ns.NetNS) error {
-		link, err := netlink.LinkByName(args.IfName)
-		addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
-		if err != nil {
-			return err
-		}
-
-		if len(addrs) > 0 {
-			mainIp = addrs[0].IP
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	if mainIp != nil {
-		macLink, err := netlink.LinkByName("mac0")
-		err = netlink.RouteDel(&netlink.Route{
-			LinkIndex: macLink.Attrs().Index,
-			Dst:       netlink.NewIPNet(mainIp),
-			Scope:     netlink.SCOPE_LINK,
-		})
-		if err != nil {
-			return err
-		}
-	}
 
 	return err
 }
