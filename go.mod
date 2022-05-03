@@ -3,7 +3,7 @@ module github.com/containernetworking/plugins
 go 1.17
 
 require (
-	github.com/Microsoft/hcsshim v0.8.16
+	github.com/Microsoft/hcsshim v0.8.20
 	github.com/alexflint/go-filemutex v1.1.0
 	github.com/buger/jsonparser v1.1.1
 	github.com/containernetworking/cni v1.0.1
@@ -18,7 +18,7 @@ require (
 	github.com/onsi/ginkgo v1.16.4
 	github.com/onsi/gomega v1.15.0
 	github.com/safchain/ethtool v0.0.0-20210803160452-9aa261dae9b1
-	github.com/vishvananda/netlink v1.1.1-0.20210330154013-f5de75959ad5
+	github.com/vishvananda/netlink v1.2.0-beta
 	go.opentelemetry.io/otel v1.3.0
 	go.opentelemetry.io/otel/metric v0.26.0
 	golang.org/x/sys v0.0.0-20210831042530-f4d43177bf5e

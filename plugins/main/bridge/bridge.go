@@ -666,6 +666,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 		result.IPs = ipamResult.IPs
 		result.Routes = ipamResult.Routes
+		result.DNS = ipamResult.DNS
 
 		if len(result.IPs) == 0 {
 			return errors.New("IPAM plugin returned missing IP config")
@@ -920,11 +921,15 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 	brInterface.Mac = br.Attrs().HardwareAddr.String()
 
-	result.DNS = n.DNS
-
 	// Return an error requested by testcases, if any
 	if debugPostIPAMError != nil {
 		return debugPostIPAMError
+	}
+
+	// Use incoming DNS settings if provided, otherwise use the
+	// settings that were already configued by the IPAM plugin
+	if dnsConfSet(n.DNS) {
+		result.DNS = n.DNS
 	}
 
 	success = true
@@ -955,6 +960,13 @@ func addRouteToHost(containerLink netlink.Link, gwIp net.IP, srcAddress net.IP) 
 	return nil
 }
 
+func dnsConfSet(dnsConf types.DNS) bool {
+	return dnsConf.Nameservers != nil ||
+		dnsConf.Search != nil ||
+		dnsConf.Options != nil ||
+		dnsConf.Domain != ""
+}
+
 func cmdDel(args *skel.CmdArgs) error {
 	n, _, err := loadNetConf(args.StdinData, args.Args)
 	if err != nil {
@@ -963,50 +975,18 @@ func cmdDel(args *skel.CmdArgs) error {
 
 	isLayer3 := n.IPAM.Type != ""
 
-	if isLayer3 {
-		if err := ipam.ExecDel(n.IPAM.Type, args.StdinData); err != nil {
-			return err
+	ipamDel := func() error {
+		if isLayer3 {
+			if err := ipam.ExecDel(n.IPAM.Type, args.StdinData); err != nil {
+				return err
+			}
 		}
-	}
-
-	if args.Netns == "" {
 		return nil
 	}
 
-	/*json, _ := json.MarshalIndent(args, "", " ")
-
-	f, err := os.Create("/tmp/cni.json")
-	defer f.Close()
-	f.Write(json)
-
-	// Parse previous result.
-	if n.RawPrevResult != nil {
-		f.WriteString("\nFound RawPrevResult")
-		// Parse previous result.
-		var result *current.Result
-		var err error
-		if err = version.ParsePrevResult(&n.NetConf); err != nil {
-			f.WriteString(fmt.Sprintf("\n%v", err))
-			return fmt.Errorf("could not parse prevResult: %v", err)
-		}
-		f.WriteString("\nParsed")
-
-		result, err = current.NewResultFromResult(n.PrevResult)
-		if err != nil {
-			f.WriteString(fmt.Sprintf("\n%v", err))
-			return fmt.Errorf("could not convert result to current version: %v", err)
-		}
-		f.WriteString("Made Result")
-		ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4)
-		if err != nil {
-			f.WriteString(fmt.Sprintf("\n%v", err))
-			return fmt.Errorf("failed to open IPTables: %v", err)
-		}
-
-		cleanupRules(ipt, createBaselineRules(result.Interfaces[1].Name))
-	} else {
-		f.WriteString("\nDidn't find RawPrevResult. WTF")
-	}*/
+	if args.Netns == "" {
+		return ipamDel()
+	}
 
 	// There is a netns so try to clean up. Delete can be called multiple times
 	// so don't return an error if the device is already removed.
@@ -1027,8 +1007,13 @@ func cmdDel(args *skel.CmdArgs) error {
 		// https://github.com/kubernetes/kubernetes/issues/43014#issuecomment-287164444
 		_, ok := err.(ns.NSPathNotExistErr)
 		if ok {
-			return nil
+			return ipamDel()
 		}
+		return err
+	}
+
+	// call ipam.ExecDel after clean up device in netns
+	if err := ipamDel(); err != nil {
 		return err
 	}
 
