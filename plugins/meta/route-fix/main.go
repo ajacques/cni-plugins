@@ -139,13 +139,7 @@ func cmdDel(args *skel.CmdArgs) error {
 		return err
 	}
 
-	netns, err := ns.GetNS(args.Netns)
-	if err != nil {
-		return err
-	}
-	defer netns.Close()
-
-	return err
+	return nil
 }
 
 func main() {

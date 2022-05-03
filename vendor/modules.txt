@@ -4,7 +4,7 @@ github.com/Microsoft/go-winio
 github.com/Microsoft/go-winio/pkg/guid
 github.com/Microsoft/go-winio/pkg/security
 github.com/Microsoft/go-winio/vhd
-# github.com/Microsoft/hcsshim v0.8.16
+# github.com/Microsoft/hcsshim v0.8.20
 ## explicit; go 1.13
 github.com/Microsoft/hcsshim
 github.com/Microsoft/hcsshim/computestorage
@@ -12,6 +12,8 @@ github.com/Microsoft/hcsshim/hcn
 github.com/Microsoft/hcsshim/internal/cni
 github.com/Microsoft/hcsshim/internal/cow
 github.com/Microsoft/hcsshim/internal/hcs
+github.com/Microsoft/hcsshim/internal/hcs/schema1
+github.com/Microsoft/hcsshim/internal/hcs/schema2
 github.com/Microsoft/hcsshim/internal/hcserror
 github.com/Microsoft/hcsshim/internal/hns
 github.com/Microsoft/hcsshim/internal/interop
@@ -23,8 +25,6 @@ github.com/Microsoft/hcsshim/internal/oc
 github.com/Microsoft/hcsshim/internal/regstate
 github.com/Microsoft/hcsshim/internal/runhcs
 github.com/Microsoft/hcsshim/internal/safefile
-github.com/Microsoft/hcsshim/internal/schema1
-github.com/Microsoft/hcsshim/internal/schema2
 github.com/Microsoft/hcsshim/internal/timeout
 github.com/Microsoft/hcsshim/internal/vmcompute
 github.com/Microsoft/hcsshim/internal/wclayer
@@ -78,10 +78,8 @@ github.com/fsnotify/fsnotify
 # github.com/go-logr/logr v1.2.1
 ## explicit; go 1.16
 github.com/go-logr/logr
-github.com/go-logr/logr/funcr
 # github.com/go-logr/stdr v1.2.0
 ## explicit; go 1.16
-github.com/go-logr/stdr
 # github.com/godbus/dbus/v5 v5.0.4
 ## explicit; go 1.12
 github.com/godbus/dbus/v5
@@ -203,23 +201,10 @@ go.opencensus.io/trace/internal
 go.opencensus.io/trace/tracestate
 # go.opentelemetry.io/otel v1.3.0
 ## explicit; go 1.16
-go.opentelemetry.io/otel
-go.opentelemetry.io/otel/attribute
-go.opentelemetry.io/otel/baggage
-go.opentelemetry.io/otel/codes
-go.opentelemetry.io/otel/internal
-go.opentelemetry.io/otel/internal/baggage
-go.opentelemetry.io/otel/internal/global
-go.opentelemetry.io/otel/propagation
 # go.opentelemetry.io/otel/metric v0.26.0
 ## explicit; go 1.16
-go.opentelemetry.io/otel/metric
-go.opentelemetry.io/otel/metric/number
-go.opentelemetry.io/otel/metric/sdkapi
-go.opentelemetry.io/otel/metric/unit
 # go.opentelemetry.io/otel/trace v1.3.0
 ## explicit; go 1.16
-go.opentelemetry.io/otel/trace
 # golang.org/x/net v0.0.0-20211209124913-491a49abca63
 ## explicit; go 1.17
 golang.org/x/net/bpf
