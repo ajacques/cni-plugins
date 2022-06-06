@@ -1,5 +1,19 @@
 [![test](https://github.com/containernetworking/plugins/actions/workflows/test.yaml/badge.svg)](https://github.com/containernetworking/plugins/actions/workflows/test.yaml?query=branch%3Amaster)
 
+# What is this fork?
+This is a fork of the main CNI plugins that I'm working on to fix a number of 
+deficiencies in DHCP+Bridge mode so I can run Kubernetes pods on the same layer2
+network as my home network.
+
+Features:
+* Persistence of DHCP leases across daemon restarts
+* Deployable as a K8s DaemonSet
+* Greatly improved bridge CNI 
+* IPv6 support
+
+Read more in my blog series:
+https://www.technowizardry.net/series/home-lab/
+
 # Plugins
 Some CNI network plugins, maintained by the containernetworking team. For more information, see the [CNI website](https://www.cni.dev).
 
