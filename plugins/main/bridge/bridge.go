@@ -745,7 +745,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		}
 
 		// Setup container routes
-		uplinkLink, err := netlink.LinkByName("cni0")
+		uplinkLink, err := netlink.LinkByName(n.BrName)
 		if err != nil {
 			return fmt.Errorf("couldn't find uplink interface '%s': %v", n.UplinkInterface, err)
 		}
@@ -794,6 +794,34 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 				if err != nil {
 					return fmt.Errorf("couldn't create ipv6 route in container to host for ip (%s): %v", gw6Ip, err)
+				}
+
+				for idx, sleep := range retries {
+					containerIpv6, err := netlink.AddrList(containerLink, netlink.FAMILY_V6)
+					if err != nil {
+						return fmt.Errorf("couldn't get IPv6 addresses for container interface '%s': %v", args.IfName, err)
+					}
+
+					var foundAddr = false
+					for _, addr := range containerIpv6 {
+						if addr.Scope == int(netlink.SCOPE_UNIVERSE) {
+							result.IPs = append(result.IPs, &current.IPConfig{
+								Interface: &containerLink.Attrs().Index,
+								Address:   *addr.IPNet,
+							})
+							foundAddr = true
+							break
+						}
+					}
+					if foundAddr {
+						break
+					}
+
+					time.Sleep(time.Duration(sleep) * time.Millisecond)
+
+					if idx == len(retries)-1 {
+						return fmt.Errorf("timed out waiting for IPv6 autoconfig: %s", hostVeth.Attrs().OperState)
+					}
 				}
 			}
 
