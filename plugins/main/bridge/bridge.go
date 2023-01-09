@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"runtime"
 	"sort"
 	"syscall"
@@ -300,7 +301,29 @@ func copyAddress(from netlink.Link, to netlink.Link, family int) (bool, *netlink
 	return !foundAddr, &newAddr, nil
 }
 
-func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool, uplinkName string, enableIPv6 bool) (*netlink.Bridge, error) {
+func findMatchingInterface(ifaceName string) (netlink.Link, error) {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list interfaces: %v", err)
+	}
+	r, err := regexp.Compile(ifaceName)
+	if err != nil {
+		return nil, fmt.Errorf("invalid uplink interface regex: %v", err)
+	}
+
+	set := ""
+
+	for _, l := range links {
+		if r.MatchString(l.Attrs().Name) {
+			return l, nil
+		}
+		set = l.Attrs().Name + "," + set
+	}
+
+	return nil, fmt.Errorf("couldn't find any matching interfaces '%s' (%s) in set: %s", ifaceName, r, set)
+}
+
+func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool, uplinkLink netlink.Link, enableIPv6 bool) (*netlink.Bridge, error) {
 	br := &netlink.Bridge{
 		LinkAttrs: netlink.LinkAttrs{
 			Name: brName,
@@ -348,10 +371,7 @@ func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool, uplin
 		return nil, err
 	}
 
-	uplinkLink, err := netlink.LinkByName(uplinkName)
-	if err != nil {
-		return nil, fmt.Errorf("couldn't find uplink interface '%s': %v", uplinkName, err)
-	}
+	uplinkName := uplinkLink.Attrs().Name
 
 	var failed bool
 	applied, gwIp, err := copyAddress(uplinkLink, br, netlink.FAMILY_V4)
@@ -516,8 +536,14 @@ func setupBridge(n *NetConf) (*netlink.Bridge, *current.Interface, error) {
 	if n.Vlan != 0 {
 		vlanFiltering = true
 	}
+
+	uplinkIface, err := findMatchingInterface(n.UplinkInterface)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to find uplink interface matching regex %q: %v", n.UplinkInterface, err)
+	}
+
 	// create bridge if necessary
-	br, err := ensureBridge(n.BrName, n.MTU, n.PromiscMode, vlanFiltering, n.UplinkInterface, n.EnableIPv6)
+	br, err := ensureBridge(n.BrName, n.MTU, n.PromiscMode, vlanFiltering, uplinkIface, n.EnableIPv6)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create bridge %q: %v", n.BrName, err)
 	}
@@ -618,6 +644,11 @@ func cmdAdd(args *skel.CmdArgs) error {
 			containerInterface,
 		},
 	}
+	file, err := os.OpenFile("/tmp/cni.log", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
 
 	if n.MacSpoofChk {
 		sc := link.NewSpoofChecker(hostInterface.Name, containerInterface.Mac, uniqueID(args.ContainerID, args.IfName))
@@ -638,6 +669,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("failed to open IPTables: %v", err)
 	}
 
+	fmt.Fprintf(file, "Is Layer3: %s\n", isLayer3)
 	if isLayer3 {
 		err = setupFirewallRules(ipt, hostInterface.Name)
 		if err != nil {
@@ -745,18 +777,13 @@ func cmdAdd(args *skel.CmdArgs) error {
 		}
 
 		// Setup container routes
-		uplinkLink, err := netlink.LinkByName(n.BrName)
-		if err != nil {
-			return fmt.Errorf("couldn't find uplink interface '%s': %v", n.UplinkInterface, err)
-		}
-
-		uplinkAddrs, err := netlink.AddrList(uplinkLink, netlink.FAMILY_V4)
+		uplinkAddrs, err := netlink.AddrList(br, netlink.FAMILY_V4)
 		if err != nil {
 			return fmt.Errorf("couldn't find IPv4 addresses for uplink interface: %v", err)
 		}
 		var gw6Ip net.IP
 		if n.EnableIPv6 {
-			uplink6Addrs, err := netlink.AddrList(uplinkLink, netlink.FAMILY_V6)
+			uplink6Addrs, err := netlink.AddrList(br, netlink.FAMILY_V6)
 			if err != nil {
 				return fmt.Errorf("couldn't find IPv6 addresses for uplink interface: %v", err)
 			}
@@ -770,6 +797,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 				return fmt.Errorf("couldn't find interface '%s' even though we just created it: %v", args.IfName, err)
 			}
 
+			// Delete all routes. We're going to explicitly create our own routes the way we want
 			routes, _ := netlink.RouteList(containerLink, netlink.FAMILY_ALL)
 			for _, route := range routes {
 				err = netlink.RouteDel(&route)
@@ -973,17 +1001,23 @@ func addRouteToHost(containerLink netlink.Link, gwIp net.IP, srcAddress net.IP) 
 		Dst:   netlink.NewIPNet(gwIp),
 	})
 	if err != nil {
-		return nil
+		return fmt.Errorf("failed to add route: %s/32 scope link dev %s (container): %v", gwIp, containerLink.Attrs().Name, err)
 	}
 	err = netlink.RouteAdd(&netlink.Route{
 		LinkIndex: containerLink.Attrs().Index,
 		Gw:        gwIp,
-		Src:       srcAddress,
+		Dst: &net.IPNet{
+			IP:   net.IPv4zero,
+			Mask: net.CIDRMask(0, 0),
+		},
+		Src:      srcAddress,
+		Priority: 1024,
 	})
 
-	if err != nil {
-		return nil
-	}
+	// Temporarily ignore this. I think this breaks when running in a Multus environment because there's already another route
+	/*if err != nil {
+		return fmt.Errorf("failed to add route: next hop %s src %s dev %s (in container): %v", gwIp, srcAddress, containerLink.Attrs().Name, err)
+	}*/
 
 	return nil
 }

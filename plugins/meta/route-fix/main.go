@@ -3,8 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net"
-
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
@@ -12,6 +10,7 @@ import (
 	"github.com/containernetworking/plugins/pkg/ns"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 	netlink "github.com/vishvananda/netlink"
+	"net"
 )
 
 type PluginConf struct {
@@ -90,6 +89,17 @@ func cmdAdd(args *skel.CmdArgs) error {
 			return fmt.Errorf("couldn't find link (%s) in container netns: %v", linkName, err)
 		}
 
+		routes, err := netlink.RouteList(containerLink, netlink.FAMILY_V4)
+		if err != nil {
+			return fmt.Errorf("couldn't list routes: %v", err)
+		}
+		for _, route := range routes {
+			err = netlink.RouteDel(&route)
+			if err != nil {
+				return fmt.Errorf("couldn't delete all routes before setting up new routes: %v", err)
+			}
+		}
+
 		route := &netlink.Route{
 			LinkIndex: containerLink.Attrs().Index,
 			Scope:     netlink.SCOPE_LINK,
@@ -105,7 +115,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 			return fmt.Errorf("couldn't create route (%s) in container: %v", route, err)
 		}
 
-		_, i, err := net.ParseCIDR("224.0.0.0/4")
+		_, multicastCidr, err := net.ParseCIDR("224.0.0.0/4")
 		if err != nil {
 			return err
 		}
@@ -114,7 +124,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 			LinkIndex: containerLink.Attrs().Index,
 			Scope:     netlink.SCOPE_LINK,
 			Src:       containerNet.IP,
-			Dst:       i,
+			Dst:       multicastCidr,
 		}
 
 		err = netlink.RouteAdd(mcastroute)
